@@ -6,7 +6,7 @@ import json
 from datetime import date
 from dateutil.relativedelta import relativedelta
 
-# --- 1. DIRECTORY & PAGE CONFIG ---
+# --- 1. DIRECTORY & INITIAL SETUP ---
 for folder in ["saved_clients", "templates"]:
     if not os.path.exists(folder):
         os.makedirs(folder)
@@ -20,21 +20,12 @@ with st.sidebar:
     main_zoom = st.slider("Workspace Font Size", 10, 30, st.session_state.main_zoom)
     st.markdown(f"<style>[data-testid='stMain'] {{ font-size: {main_zoom}px !important; }}</style>", unsafe_allow_html=True)
 
-# --- 3. LIBRARIES & DATABASE ---
+# --- 3. LIBRARIES ---
 TRADING_PL_HEADS = ["Sales", "Opening Stock", "Purchases", "Wages", "Direct Expenses", "Salaries", "Office Rent", "Audit Fees", "Depreciation", "Interest Received"]
 BALANCE_SHEET_HEADS = ["Proprietor's Capital", "Secured Loans", "Unsecured Loans", "Sundry Creditors", "Sundry Debtors", "Cash-in-Hand", "Balance with Banks"]
-DB_FILE = "client_database.json"
+IT_BLOCKS = {"Building (10%)": 0.10, "Furniture (10%)": 0.10, "Plant & Machinery (15%)": 0.15, "Computers (40%)": 0.40}
 
-def load_db():
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r") as f: return json.load(f)
-        except: return {}
-    return {}
-
-if 'db' not in st.session_state: st.session_state.db = load_db()
-
-# --- 4. SIDEBAR: CLIENT DOSSIER & KYC ---
+# --- 4. SIDEBAR: KYC, LOANS & REFERENCES ---
 with st.sidebar:
     st.header("👤 Customer & KYC Dossier")
     company_name = st.text_input("Firm/Client Name", "M/s Rudra Earthmovers")
@@ -55,6 +46,16 @@ with st.sidebar:
         st.text_input(f"Ref {r} Name", key=f"ref_name_{r}")
         st.text_input(f"Ref {r} Contact", key=f"ref_num_{r}")
 
+    st.divider()
+    st.header("💳 Running Loans (EMIs)")
+    num_loans = st.number_input("Existing Loans?", 0, 10, 0)
+    total_existing_emi = 0.0
+    for j in range(int(num_loans)):
+        with st.expander(f"Loan {j+1}", expanded=False):
+            st.text_input("Bank Name", key=f"ln_bnk_{j}")
+            emi = st.number_input("Monthly EMI", key=f"emi_{j}")
+            total_existing_emi += emi
+
 # --- 5. MAIN INTERFACE TABS ---
 st.title(f"⚖️ CA Practice & Loan Master: {company_name}")
 st.markdown("**CA KAILASH MALI | Udaipur**")
@@ -66,82 +67,71 @@ with t_input:
     def load_template(form_type, firm_cat):
         file_path = f"templates/{firm_cat.replace(' ', '_')}_{form_type}.csv"
         if os.path.exists(file_path): return pd.read_csv(file_path)
-        return pd.DataFrame({"Particulars": ["Sales", "Purchases", "Salaries", "Depreciation"], "Amount": [0.0]*4, "Add Back": [False]*4})
+        if form_type == "PL":
+            # FIXED: Added 'Group' column back to prevent KeyError
+            return pd.DataFrame({
+                "Particulars": ["Sales", "Purchases", "Salaries", "Depreciation"], 
+                "Group": ["Income", "Expense", "Expense", "Expense"], 
+                "Amount": [0.0]*4, 
+                "Add Back": [False]*4
+            })
+        return pd.DataFrame({"Particulars": ["Capital", "Sundry Creditors"], "Group": ["Liability", "Liability"], "Amount": [0.0]*2})
     
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Profit & Loss Account")
-        pl_ed = st.data_editor(load_template("PL", firm_type), key=f"pl_{firm_type}", num_rows="dynamic", use_container_width=True,
+        pl_ed = st.data_editor(load_template("PL", firm_type), key=f"pl_ed", num_rows="dynamic", use_container_width=True,
                                column_config={"Particulars": st.column_config.SelectboxColumn("Account Head", options=TRADING_PL_HEADS)})
+        if st.button("💾 Save Default P&L"):
+            pl_ed.to_csv(f"templates/{firm_type.replace(' ', '_')}_PL.csv", index=False)
+            st.success("Template Saved!")
+
     with c2:
         st.subheader("Balance Sheet")
-        bs_ed = st.data_editor(load_template("BS", firm_type), key=f"bs_{firm_type}", num_rows="dynamic", use_container_width=True,
+        bs_ed = st.data_editor(load_template("BS", firm_type), key=f"bs_ed", num_rows="dynamic", use_container_width=True,
                                column_config={"Particulars": st.column_config.SelectboxColumn("Account Head", options=BALANCE_SHEET_HEADS)})
-    
+        if st.button("💾 Save Default BS"):
+            bs_ed.to_csv(f"templates/{firm_type.replace(' ', '_')}_BS.csv", index=False)
+            st.success("Template Saved!")
+
     if st.button("🚀 SAVE CLIENT DATA"):
         file_path = f"saved_clients/{company_name.replace(' ', '_')}_{selected_fy}.csv"
         pd.concat([pl_ed, bs_ed], ignore_index=True).to_csv(file_path, index=False)
         st.success(f"Dossier for {company_name} saved!")
 
-# --- TAB 2: CASH PROFIT ANALYSIS ---
-with t_analysis:
-    st.header("🧮 Average Cash Profit Calculation")
-    years_to_avg = st.multiselect("Select years to include", ["2023-24", "2024-25", "2025-26"])
-    if st.button("Calculate Average"):
-        cp_vals = []
-        for y in years_to_avg:
-            path = f"saved_clients/{company_name.replace(' ', '_')}_{y}.csv"
-            if os.path.exists(path):
-                data = pd.read_csv(path)
-                add_back = data[data['Add Back'] == True]['Amount'].sum()
-                cp_vals.append(add_back) 
-        if cp_vals: st.metric("Average Cash Profit", f"₹{sum(cp_vals)/len(cp_vals):,.2f}")
-
-# --- TAB 3: LOAN ELIGIBILITY (Integrated Logic) ---
+# --- TAB 3: LOAN ELIGIBILITY ---
 with t_eligibility:
-    st.header("🏦 Integrated Loan Eligibility Assessment")
-    
-    # Auto-fetch data from P&L Input
+    st.header("🏦 Loan Eligibility Assessment")
+    # Fetch Data from PL table securely
     input_dep = pl_ed[pl_ed['Particulars'] == "Depreciation"]['Amount'].sum()
-    input_np = pl_ed[pl_ed['Group'] == "Expense"]['Amount'].sum() # Example: Using Expense sum for NP logic
     
     col_e1, col_e2 = st.columns(2)
     with col_e1:
-        st.subheader("Income Details (Auto-Fetched)")
-        net_profit = st.number_input("Net Profit (Current FY)", value=0.0)
-        depreciation = st.number_input("Add Back: Depreciation", value=float(input_dep))
+        st.subheader("Income Analysis")
+        # Let user override NP but pre-fill Dep
+        net_profit = st.number_input("Annual Net Profit (NPBT)", value=0.0)
+        depreciation = st.number_input("Depreciation (Auto-filled)", value=float(input_dep))
         cash_profit = net_profit + depreciation
         st.metric("Total Annual Cash Profit", f"₹{cash_profit:,.2f}")
 
     with col_e2:
-        st.subheader("Running Obligations")
-        num_other_emis = st.number_input("How many existing Monthly EMIs?", 0, 10, 0)
-        total_other_emi = 0.0
-        for k in range(int(num_other_emis)):
-            total_other_emi += st.number_input(f"EMI {k+1} Amount", key=f"elig_emi_{k}")
+        st.subheader("Obligations")
+        st.metric("Total Monthly EMIs", f"₹{total_existing_emi:,.2f}")
+        st.metric("Yearly Obligations", f"₹{total_existing_emi * 12:,.2f}")
 
-    # Eligibility Logic
     st.divider()
-    foir = st.slider("FOIR % (Fixed Obligation to Income Ratio)", 10, 100, 60)
-    max_emi_allowed = (cash_profit / 12) * (foir / 100)
-    net_eligible_emi = max(0.0, max_emi_allowed - total_other_emi)
+    foir = st.slider("FOIR % (Capacity)", 10, 100, 60)
+    max_emi_cap = (cash_profit / 12) * (foir / 100)
+    net_emi_eligible = max(0.0, max_emi_cap - total_existing_emi)
     
-    st.write(f"### Additional EMI Capacity: ₹{net_eligible_emi:,.2f}")
+    st.write(f"### Eligible Additional Monthly EMI: ₹{net_emi_eligible:,.2f}")
     
     r_p, t_p = st.columns(2)
-    new_roi = r_p.number_input("Proposed Interest Rate (%)", value=9.5)
-    new_tenure = t_p.number_input("Proposed Tenure (Years)", value=15)
+    roi = r_p.number_input("Bank ROI (%)", value=9.5)
+    tenure = t_p.number_input("Tenure (Years)", value=15)
     
-    if net_eligible_emi > 0:
-        r_v, n_v = (new_roi/12)/100, new_tenure * 12
-        eligible_loan = net_eligible_emi * ((1 - (1 + r_v)**-n_v) / r_v)
-        st.success(f"## Maximum Eligible Loan Amount: ₹{eligible_loan:,.0f}")
-
-# --- TAB 4: FINAL REPORTS ---
-with t_report:
-    if st.button("📊 GENERATE BANK APPLICATION SUMMARY"):
-        st.markdown(f'<div style="background-color:#5B9BD5;color:white;text-align:center;padding:10px;font-weight:bold;font-size:24px;">BANK LOAN APPLICATION DOSSIER</div>', unsafe_allow_html=True)
-        st.write(f"**Client:** {company_name} | **FY:** {selected_fy}")
-        st.subheader("Reference Details")
-        refs = [{"Ref": f"Ref {r}", "Name": st.session_state.get(f"ref_name_{r}", ""), "Contact": st.session_state.get(f"ref_num_{r}", "")} for r in range(1, 4)]
-        st.table(pd.DataFrame(refs))
+    if net_emi_eligible > 0:
+        r_v = (roi/12)/100
+        n_v = tenure * 12
+        loan_amt = net_emi_eligible * ((1 - (1 + r_v)**-n_v) / r_v)
+        st.success(f"## Estimated Loan Eligibility: ₹{loan_amt:,.0f}")
